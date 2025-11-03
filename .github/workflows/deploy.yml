@@ -43,37 +43,66 @@ jobs:
           script: |
             set -euo pipefail
 
-            # Ensure git and docker compose are available
+            echo "🔹 Ensuring git..."
             if ! command -v git >/dev/null 2>&1; then
-              sudo apt-get update -y
-              sudo apt-get install -y git
+              if command -v yum >/dev/null 2>&1; then
+                sudo yum update -y
+                sudo yum install -y git
+              elif command -v dnf >/dev/null 2>&1; then
+                sudo dnf install -y git
+              elif command -v apt-get >/dev/null 2>&1; then
+                sudo apt-get update -y
+                sudo apt-get install -y git
+              fi
             fi
 
+            echo "🔹 Ensuring Docker..."
+            if ! command -v docker >/dev/null 2>&1; then
+              curl -fsSL https://get.docker.com | sh
+              sudo systemctl enable docker || true
+              sudo systemctl start docker || true
+            fi
+
+            echo "🔹 Ensuring Docker Compose plugin..."
             if ! docker compose version >/dev/null 2>&1; then
-              # Install Docker if missing, and ensure compose v2 is present
-              if ! command -v docker >/dev/null 2>&1; then
-                curl -fsSL https://get.docker.com | sh
-                sudo usermod -aG docker "$USER" || true
-              fi
+              sudo mkdir -p /usr/local/lib/docker/cli-plugins
+              sudo curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+                -o /usr/local/lib/docker/cli-plugins/docker-compose
+              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
             fi
 
             APP_DIR=~/dockermy
 
-            # Clone or update repo
+            echo "🔹 Pulling latest code..."
             if [ -d "$APP_DIR/.git" ]; then
-              git -C "$APP_DIR" fetch --all --prune
-              git -C "$APP_DIR" checkout main
-              git -C "$APP_DIR" pull --rebase --autostash
+              cd "$APP_DIR"
+              git fetch --all --prune
+              git reset --hard origin/main
             else
-              git clone --depth=1 "https://github.com/${{ github.repository }}.git" "$APP_DIR"
+              git clone "https://github.com/${{ github.repository }}.git" "$APP_DIR"
+              cd "$APP_DIR"
             fi
 
-            cd "$APP_DIR"
+            # Optionally create an .env from GitHub Secrets (recommended)
+            if [ -n "${{ secrets.MONGO_URI }}" ]; then
+              echo "🔹 Writing .env from secrets..."
+              cat > .env <<'EOF'
+MONGO_URI=${{ secrets.MONGO_URI }}
+PORT=5000
+EOF
+              USE_ENV_FILE=1
+            else
+              USE_ENV_FILE=0
+            fi
 
-            # Bring up stack with Docker Compose (build on server)
-            docker compose -f docker-compose.yml up -d --build
+            echo "🔹 Rebuilding containers..."
+            if [ "$USE_ENV_FILE" = "1" ]; then
+              sudo docker compose --env-file .env up -d --build
+            else
+              sudo docker compose up -d --build
+            fi
 
-            # Optional cleanup of dangling images
-            docker image prune -f || true
+            echo "🔹 Cleaning up old images..."
+            sudo docker image prune -f || true
 
 
